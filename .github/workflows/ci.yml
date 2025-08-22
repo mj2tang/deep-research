@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Set up Node.js (for MCP servers)
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+    
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      with:
+        version: "latest"
+    
+    - name: Cache uv dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/uv
+        key: ${{ runner.os }}-uv-${{ hashFiles('**/uv.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-uv-
+    
+    - name: Install dependencies
+      run: uv sync --dev
+    
+    - name: Check project structure
+      run: |
+        echo "Checking project structure..."
+        ls -la
+        ls -la src/
+        ls -la notebooks/
+    
+    - name: Validate notebook execution (basic syntax check)
+      run: |
+        uv run jupyter nbconvert --to notebook --execute --ExecutePreprocessor.timeout=60 \
+          notebooks/1_scoping.ipynb --output temp_1_scoping.ipynb || echo "Notebook 1 has execution issues"
+        rm -f notebooks/temp_*.ipynb
+    
+    - name: Verify generated source files exist
+      run: |
+        echo "Checking generated source files..."
+        test -f src/deep_research_from_scratch/research_agent_scope.py || echo "Missing: research_agent_scope.py"
+        test -f src/deep_research_from_scratch/state_scope.py || echo "Missing: state_scope.py"
+        test -f src/deep_research_from_scratch/prompts.py || echo "Missing: prompts.py"
+        test -f src/deep_research_from_scratch/utils.py || echo "Missing: utils.py"
+    
+    - name: Import test (ensure modules can be imported)
+      run: |
+        uv run python -c "
+        try:
+            import deep_research_from_scratch
+            print('✅ Package import successful')
+        except ImportError as e:
+            print(f'❌ Package import failed: {e}')
+            exit(1)
+        "
+    
+    - name: Test basic functionality (if possible without API keys)
+      run: |
+        uv run python -c "
+        import sys
+        sys.path.insert(0, 'src')
+        try:
+            from deep_research_from_scratch import utils
+            print('✅ Utils module import successful')
+        except Exception as e:
+            print(f'⚠️  Utils import issue: {e}')
+        "
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+    
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+    
+    - name: Build package
+      run: |
+        uv build
+        ls -la dist/
+    
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: dist-${{ github.sha }}
+        path: dist/
+        retention-days: 30

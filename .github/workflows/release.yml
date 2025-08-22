@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release'
+        required: true
+        type: string
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+    
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      with:
+        version: "latest"
+    
+    - name: Install dependencies
+      run: uv sync --dev
+    
+    - name: Run tests
+      run: |
+        uv run ruff check src/
+        uv run ruff format --check src/
+        uv run mypy src/ --ignore-missing-imports
+    
+    - name: Build package
+      run: uv build
+    
+    - name: Verify build
+      run: |
+        ls -la dist/
+        uv run python -m twine check dist/*
+    
+    - name: Generate release notes
+      id: release_notes
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          TAG="${{ github.event.inputs.tag }}"
+        else
+          TAG=${GITHUB_REF#refs/tags/}
+        fi
+        
+        echo "TAG=$TAG" >> $GITHUB_OUTPUT
+        
+        # Generate release notes from recent commits
+        PREV_TAG=$(git describe --tags --abbrev=0 $TAG^ 2>/dev/null || echo "")
+        
+        if [ -n "$PREV_TAG" ]; then
+          echo "## Changes since $PREV_TAG" > release_notes.md
+          git log --pretty=format:"- %s (%h)" $PREV_TAG..$TAG >> release_notes.md
+        else
+          echo "## Initial Release" > release_notes.md
+          echo "First release of Deep Research - a comprehensive deep research system built with LangGraph." >> release_notes.md
+        fi
+        
+        echo "" >> release_notes.md
+        echo "## Installation" >> release_notes.md
+        echo "\`\`\`bash" >> release_notes.md
+        echo "pip install deep-research-from-scratch==$TAG" >> release_notes.md
+        echo "\`\`\`" >> release_notes.md
+    
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.release_notes.outputs.TAG }}
+        name: Release ${{ steps.release_notes.outputs.TAG }}
+        body_path: release_notes.md
+        files: |
+          dist/*.whl
+          dist/*.tar.gz
+        draft: false
+        prerelease: ${{ contains(steps.release_notes.outputs.TAG, 'rc') || contains(steps.release_notes.outputs.TAG, 'alpha') || contains(steps.release_notes.outputs.TAG, 'beta') }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    # Uncomment below if you want to publish to PyPI
+    # - name: Publish to PyPI
+    #   uses: pypa/gh-action-pypi-publish@release/v1
+    #   with:
+    #     password: ${{ secrets.PYPI_API_TOKEN }}
+    #     skip-existing: true
